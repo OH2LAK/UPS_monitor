@@ -81,14 +81,13 @@ email:
     - "you@example.com"
 
 # --------------------------------------------------------------------------
-# SMS notifications. Ships wired up for the Setera SMSGW
-# (https://sms-gw.setera.com:8040/sms, JSON body, "token" header for auth)
-# - see send_sms() in ups_monitor.py if you need to adapt it to a different
-# provider's API.
+# SMS notifications. Ships wired up for a generic HTTP SMS gateway that
+# takes a JSON POST body and a "token" header for auth - see send_sms() in
+# ups_monitor.py if you need to adapt it to a different provider's API.
 # --------------------------------------------------------------------------
 sms:
   enabled: true
-  gateway_url: "https://sms-gw.setera.com:8040/sms"
+  gateway_url: "https://sms-gateway.example.com/sms"
   # API token your SMS gateway provider issues (via a secure channel).
   api_token: "CHANGE_ME"   # do not commit the real value
   # Sender ID shown to the recipient (your provider assigns/approves this).
@@ -97,10 +96,47 @@ sms:
   # supports/requires an external_id). Leave blank ("") to omit it.
   external_id_prefix: ""
   # Add/remove destination numbers freely. Can be written with or without
-  # the leading "+" - the script strips it automatically since Setera
-  # wants E.164 without "+" (e.g. 15551234567).
+  # the leading "+" - the script strips it automatically, since this
+  # gateway wants E.164 without "+" (e.g. 15551234567). Adjust send_sms()
+  # if your provider expects the "+" kept.
   to_numbers:
     - "+15551234567"
+
+# --------------------------------------------------------------------------
+# Push notifications via ntfy (https://ntfy.sh, or a self-hosted server -
+# see https://github.com/binwiederhier/ntfy). A free, lightweight option
+# alongside/instead of email and SMS - install the ntfy app (iOS/Android/
+# desktop) and subscribe to your topic to receive these.
+#
+# "topic" only needs to match between here and the app - anyone who knows
+# it can publish/subscribe on the public ntfy.sh server, so treat it like a
+# shared secret (a long random string) unless you're self-hosting with auth
+# enabled or using a paid ntfy.sh reserved topic.
+#
+# Auth (only needed for a self-hosted server with access control, or a
+# reserved topic) - leave both unset for the default public-topic case:
+#   token: an ntfy access token, sent as a Bearer token
+#   username / password: HTTP basic auth
+#
+# priority/tags below are the defaults for the "power lost" message
+# (1=min .. 5=urgent; urgent bypasses Do Not Disturb on most ntfy apps).
+# recovery_priority/recovery_tags and charge_complete_priority/
+# charge_complete_tags do the same for the other two message types - see
+# https://docs.ntfy.sh/publish/#tags-emojis for the tag list.
+# --------------------------------------------------------------------------
+ntfy:
+  enabled: false
+  server: "https://ntfy.sh"
+  topic: "CHANGE_ME-use-a-long-random-string"
+  # token: "CHANGE_ME"
+  # username: "CHANGE_ME"
+  # password: "CHANGE_ME"
+  priority: 5
+  tags: ["warning", "zap"]
+  recovery_priority: 3
+  recovery_tags: ["white_check_mark"]
+  charge_complete_priority: 2
+  charge_complete_tags: ["battery"]
 
 # --------------------------------------------------------------------------
 # Status code -> plain-language description, used as {status_description}
@@ -172,16 +208,17 @@ status_descriptions:
 # the plain templates above it. If you don't set a recovery_* template, the
 # plain one is used for that transition too.
 #
-# The full lifecycle of an outage is 4 steps, and only email/SMS is sent
-# for the ones noted:
+# The full lifecycle of an outage is 4 steps, and only email/SMS/ntfy is
+# sent for the ones noted:
 #   1) OL (mains fine)                                       - (no message)
-#   2) OB (mains lost)                            -> SMS + email (above)
-#   3) OB -> OL/OL CHRG (mains back, battery charging) -> SMS + email (recovery_*)
-#   4) OL CHRG -> OL (battery finished recharging) -> EMAIL ONLY (charge_complete_*
-#      below) - only sent if step 3 actually happened first (i.e. this
-#      won't fire for routine float-charge maintenance unrelated to a real
-#      outage). Extra placeholder available here: {outage_duration} - the
-#      duration of the outage that preceded this charge cycle.
+#   2) OB (mains lost)                     -> SMS + email + ntfy (above)
+#   3) OB -> OL/OL CHRG (mains back, battery charging) -> SMS + email + ntfy (recovery_*)
+#   4) OL CHRG -> OL (battery finished recharging) -> EMAIL + ntfy ONLY, no SMS
+#      (charge_complete_* below) - only sent if step 3 actually happened
+#      first (i.e. this won't fire for routine float-charge maintenance
+#      unrelated to a real outage). Extra placeholder available here:
+#      {outage_duration} - the duration of the outage that preceded this
+#      charge cycle.
 # --------------------------------------------------------------------------
 messages:
   email:
@@ -201,8 +238,10 @@ messages:
       Time: {timestamp}
 
     # Step 4 only - sent once the battery finishes recharging after a real
-    # outage (CHRG clears). Email only, no SMS - this is informational, not
-    # urgent, unlike steps 2 and 3 above.
+    # outage (CHRG clears). Email only, no SMS/ntfy priority push - this is
+    # informational, not urgent, unlike steps 2 and 3 above (ntfy still gets
+    # a low-priority notification for it - see charge_complete_title/text
+    # under ntfy: below).
     charge_complete_subject: "[UPS OK] {ups_name}: Battery fully recharged"
     charge_complete_body: |
       UPS: {ups_name} ({description})
@@ -219,3 +258,24 @@ messages:
       {timestamp}
       {ups_name}
       Power restored! Outage duration {duration}
+
+  # ntfy notifications sent for all 3 message-worthy steps of the outage
+  # lifecycle (see ntfy: above for enabling/topic/auth/priority/tags).
+  # "title" is the notification's title line, "text" is its body - both
+  # accept the same {placeholders} as email/sms above. If you don't set
+  # recovery_title/recovery_text, the plain title/text is reused for the
+  # recovery notification too.
+  ntfy:
+    title: "{ups_name}: {old_status} -> {new_status}"
+    text: |-
+      {description}
+      {status_description}
+      Time in previous status: {duration}
+    recovery_title: "{ups_name}: Power restored"
+    recovery_text: |-
+      {description}
+      Power restored - outage duration {duration}
+    charge_complete_title: "{ups_name}: Battery fully recharged"
+    charge_complete_text: |-
+      {description}
+      Outage duration was: {outage_duration}
