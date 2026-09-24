@@ -16,21 +16,22 @@ so numbers/addresses/templates can be edited live without a restart.
 - Every `poll_interval_seconds`, the script runs `upsc <name>@<host>
   ups.status` for each configured UPS.
 - If a UPS's *core* status (OL/OB/LB/...) differs from what it was last
-  poll, an email and an SMS are sent. CHRG/DISCHRG toggling on their own
-  (e.g. once a battery finishes recharging) doesn't count as a core change
-  and doesn't alert by itself.
+  poll, an email, an SMS, and an ntfy push notification are sent (any of
+  the three can be individually disabled in `config.yaml`). CHRG/DISCHRG
+  toggling on their own (e.g. once a battery finishes recharging) doesn't
+  count as a core change and doesn't alert by itself.
 - The full lifecycle of a real outage is tracked in 4 steps, and
   `state.json` (see below) remembers exactly where in that lifecycle each
   UPS currently is, across restarts:
   1. `OL` - mains fine, no message.
-  2. `OB` - mains lost -> **SMS + email**.
+  2. `OB` - mains lost -> **SMS + email + ntfy**.
   3. `OB` -> `OL`/`OL CHRG` - mains back, battery now charging ->
-     **SMS + email** (a `recovery_*` template, reporting the true outage
-     duration).
-  4. `OL CHRG` -> `OL` - battery finished recharging -> **email only**
-     (a `charge_complete_*` template) - only fires if step 3 actually
-     happened first, so routine float-charge maintenance unrelated to a
-     real outage never sends this.
+     **SMS + email + ntfy** (a `recovery_*` template, reporting the true
+     outage duration).
+  4. `OL CHRG` -> `OL` - battery finished recharging -> **email + ntfy
+     only, no SMS** (a `charge_complete_*` template) - only fires if step 3
+     actually happened first, so routine float-charge maintenance unrelated
+     to a real outage never sends this.
 - If `upsc` itself fails (driver not connected, `upsd` unreachable), the
   status is treated as `UNKNOWN` and alerted on too - so the monitor also
   catches its own monitoring chain breaking, not just real power events. A
@@ -61,11 +62,14 @@ so numbers/addresses/templates can be edited live without a restart.
   `sdnotify` is optional - if it's not installed the script keeps working,
   it just skips systemd watchdog pings (see [Watchdog](#watchdog) below).
 - An SMTP server/account for outbound email.
-- Access to an SMS gateway. This project ships wired up for the
-  [Setera](https://setera.com) SMSGW (`POST
-  https://sms-gw.setera.com:8040/sms`, JSON body, `token` header) - see
-  `send_sms()` in `ups_monitor.py` if you need to adapt it to a different
-  provider.
+- Access to an SMS gateway. This project ships wired up for a generic HTTP
+  SMS gateway (`POST` to a URL you configure, JSON body, `token` header for
+  auth) - see `send_sms()` in `ups_monitor.py` if you need to adapt it to a
+  different provider's API.
+- (Optional) A free [ntfy](https://github.com/binwiederhier/ntfy) topic for
+  push notifications - either the public `ntfy.sh` server or a self-hosted
+  instance. Install the ntfy app on your phone/desktop and subscribe to
+  your topic to receive alerts there, alongside or instead of email/SMS.
 
 ## Files
 
@@ -90,16 +94,19 @@ file (or `config.example.yaml`) for the full picture. In short:
   Optional per-UPS `voltage_fallback: true` (+ optional
   `voltage_ob_threshold`) for units with the OL/OB-misreporting quirk
   described above.
-- `email` / `sms`: SMTP and SMS gateway settings, and recipient lists.
+- `email` / `sms` / `ntfy`: SMTP settings, SMS gateway settings, and ntfy
+  server/topic/auth settings, plus recipient lists (email/SMS) or
+  priority/tags (ntfy). `ntfy` is disabled by default - set `enabled: true`
+  and a real `topic` to turn it on.
 - `status_descriptions`: maps NUT's status codes (`OL`, `OB`, `LB`, ...) to
   human-readable text - edit freely, any language, to keep alerts
   non-technical.
-- `messages`: email subject/body and SMS text templates, with
-  placeholders like `{ups_name}`, `{status_description}`, `{duration}` -
-  see the comments in `config.yaml` for the full placeholder list.
+- `messages`: email subject/body, SMS text, and ntfy title/text templates,
+  with placeholders like `{ups_name}`, `{status_description}`, `{duration}`
+  - see the comments in `config.yaml` for the full placeholder list.
   Separate `recovery_*` templates are used for the "power restored" step,
-  and `charge_complete_*` templates (email only) for the "battery fully
-  recharged" step - see "How it works" above.
+  and `charge_complete_*` templates (email + ntfy, no SMS) for the "battery
+  fully recharged" step - see "How it works" above.
 - `poll_interval_seconds`, `state_file`, `log_file`,
   `voltage_ob_threshold_default`: operational settings.
 
@@ -291,13 +298,16 @@ python3 ups_monitor.py --config config.yaml --test-sms
 # Send a real test email to every address in config.yaml, then exit
 python3 ups_monitor.py --config config.yaml --test-email
 
+# Send a real test push notification to config.yaml's ntfy.topic, then exit
+python3 ups_monitor.py --config config.yaml --test-ntfy
+
 # Print current status (see "Checking current status" above)
 python3 ups_monitor.py --config config.yaml --status
 ```
 
-`--test-sms` / `--test-email` send even if `enabled: false` is set in
-`config.yaml` (with a warning logged) - the point of the flag is to check
-the gateway/SMTP connection works.
+`--test-sms` / `--test-email` / `--test-ntfy` send even if `enabled: false`
+is set in `config.yaml` (with a warning logged) - the point of the flag is
+to check the gateway/SMTP/ntfy connection works.
 
 ## Troubleshooting
 
@@ -313,6 +323,10 @@ the gateway/SMTP connection works.
   shows the exact problem (bad token, wrong sender ID, etc.).
 - **Email not arriving**: run `--test-email` and check the log for the
   SMTP error.
+- **ntfy notification not arriving**: run `--test-ntfy` and check the log -
+  `send_ntfy()` logs the HTTP status, and a common cause is the app not
+  actually being subscribed to the exact `topic` string in `config.yaml`
+  (topics are case-sensitive and must match exactly).
 - **Service won't start / gets restarted every 60s**: if `sdnotify` isn't
   installed, remove `WatchdogSec=60` (and ideally `Type=notify` ->
   `Type=simple`) from `ups-monitor.service`, since nothing will be sending
@@ -382,3 +396,12 @@ working from an older copy:
   (`ups-monitor.logrotate`) - see "Log rotation" above for why the
   directory move was necessary (logrotate's `su` directive needs a
   directory the service account actually owns).
+- **ntfy push notification support added** (`send_ntfy()`, a `ntfy:`
+  config section, and `messages.ntfy` templates): a third, optional
+  notification channel alongside email and SMS, using
+  [ntfy](https://github.com/binwiederhier/ntfy) - either the public
+  `ntfy.sh` server or a self-hosted instance. Sent for the same 3
+  message-worthy steps of the outage lifecycle as email (mains lost, power
+  restored, battery fully recharged), each with its own configurable
+  priority/tags. Disabled by default; a `--test-ntfy` flag was added
+  alongside the existing `--test-sms`/`--test-email`.
