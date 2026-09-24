@@ -1,0 +1,10 @@
+# Real config contains SMTP password and SMS API token - never commit it.
+# Copy config.example.yaml to config.yaml locally and fill in real values.
+config.yaml
+
+# Runtime state/logs - machine-specific, not part of the source.
+state.json
+*.log
+
+__pycache__/
+*.pyc

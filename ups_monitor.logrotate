@@ -1,0 +1,25 @@
+# /etc/logrotate.d/ups-monitor
+#
+# Rotates /var/log/ups_monitor/ups_monitor.log. The log now lives in its
+# own directory (owned by ups_monitor:ups_monitor) rather than directly in
+# /var/log, because logrotate's "su" directive drops privileges to
+# ups_monitor:ups_monitor to do the rotation - and that user has no write
+# access to /var/log itself (owned by root, mode 755), only to its own
+# subdirectory.
+#
+# The ups_monitor.py process holds this file open continuously via a plain
+# logging.FileHandler (no signal handler to make it reopen the file on its
+# own), so we use copytruncate: logrotate copies the current content aside
+# and truncates the original file in place - the running process just
+# keeps writing to the same (now empty) file descriptor, no restart needed.
+/var/log/ups_monitor/ups_monitor.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 ups_monitor ups_monitor
+    su ups_monitor ups_monitor
+}

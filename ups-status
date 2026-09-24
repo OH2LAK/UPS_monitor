@@ -1,0 +1,9 @@
+#!/bin/sh
+# Shortcut for checking ups_monitor's current status - installed as
+# /usr/local/bin/ups-status so you can just run "ups-status" from anywhere.
+#
+# Runs as the ups_monitor user (matches the file ownership of state.json
+# and config.yaml under /opt/ups_monitor) via sudo - you'll be prompted for
+# YOUR OWN sudo password, not ups_monitor's (it has none/is a service
+# account), same as any other "sudo -u" command.
+exec sudo -u ups_monitor python3 /opt/ups_monitor/ups_monitor.py --config /opt/ups_monitor/config.yaml --status

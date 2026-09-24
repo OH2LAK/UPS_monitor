@@ -1,0 +1,58 @@
+[Unit]
+Description=UPS status monitor (NUT -> email/SMS)
+After=network-online.target nut-server.service
+Wants=network-online.target
+
+[Service]
+# Type=notify: the script itself tells systemd "I'm up" (READY=1) and
+# "I'm still alive" (WATCHDOG=1, sent every 10s - see WATCHDOG_PING_INTERVAL
+# in ups_monitor.py) via the sdnotify library. This catches not just crashes
+# but also a HUNG process (e.g. stuck waiting on something) that never
+# actually exits - Restart=always alone would not restart a hung-but-running
+# process, but a watchdog timeout will.
+Type=notify
+NotifyAccess=main
+
+# Run as an unprivileged, dedicated service account instead of root.
+# Create it once with:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin ups_monitor
+# No supplementary groups are needed: this script only talks to upsd over
+# TCP (upsc NAME@localhost), it never touches USB devices or NUT's driver
+# sockets directly - those stay owned by the "nut" user/group as before.
+# You DO need to chown /opt/ups_monitor, the state_file path, and the
+# log_file path to this user first - see the setup notes delivered with
+# this file.
+User=ups_monitor
+Group=ups_monitor
+
+# How long systemd waits without a WATCHDOG=1 ping before deciding the
+# process is stuck and restarting it. The script pings every 10s
+# (WATCHDOG_PING_INTERVAL), so 60s gives a comfortable safety margin even
+# under load - adjust only if you also change that constant in the script.
+WatchdogSec=60
+
+# Adjust these two paths if you install the script somewhere other than
+# /opt/ups_monitor.
+WorkingDirectory=/opt/ups_monitor
+ExecStart=/usr/bin/python3 /opt/ups_monitor/ups_monitor.py --config /opt/ups_monitor/config.yaml
+
+# --- Restart behaviour: keep restarting no matter how the script dies ---
+# Restart=always covers a crash, an unhandled exception, being killed, a
+# clean exit, AND a watchdog timeout above - systemd starts it back up
+# regardless of the reason it went down.
+Restart=always
+RestartSec=10
+
+# StartLimitIntervalSec/StartLimitBurst normally make systemd GIVE UP
+# restarting after too many failures in a short time. Setting Burst very
+# high within a short window effectively means "keep trying forever" -
+# appropriate here since a UPS monitor should never just stay down.
+StartLimitIntervalSec=60
+StartLimitBurst=1000
+
+# Send the service's own crash/restart messages to the system journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

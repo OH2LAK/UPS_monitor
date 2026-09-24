@@ -1,0 +1,221 @@
+# ups_monitor configuration
+# Edit this file to add/remove UPS units, email recipients, and SMS numbers.
+# No code changes needed for that - just edit the lists below.
+#
+# Copy this file to config.yaml and fill in your real values - config.yaml
+# is the one the script actually reads (see --config), and it's the one
+# that should NEVER be committed to a public repo (it ends up holding SMTP
+# and SMS gateway credentials). See .gitignore.
+
+# How often to poll all UPS units, in seconds. 2-5 seconds is fine on
+# typical server hardware even with several UPS units - each poll is just
+# one lightweight "upsc" query per unit against NUT's own upsd cache, not
+# a fresh USB round-trip. Only go much lower than 2s if you've actually
+# measured CPU headroom to spare.
+poll_interval_seconds: 5
+
+# Where to store last-known status per UPS, so we only alert on CHANGES,
+# not on every single poll - also what the --status flag reads from (see
+# below). Safe to leave as-is. Written atomically (temp file + rename), so
+# a crash or power loss mid-write can't leave it corrupted.
+state_file: /var/lib/ups_monitor/state.json
+
+# Log file for the monitor's own activity (not UPS data itself). Lives in
+# its own directory (owned by the service account) rather than directly in
+# /var/log, so a logrotate "su" directive can rotate it without needing
+# write access to /var/log itself - see the "Log rotation" section in
+# README.md.
+log_file: /var/log/ups_monitor/ups_monitor.log
+
+# Default input.voltage threshold (volts) used to decide OL vs OB for any
+# UPS with "voltage_fallback: true" set below, UNLESS that UPS sets its own
+# "voltage_ob_threshold". Set this comfortably below your nominal mains
+# voltage (e.g. 180 for a 230V system, ~140 for 120V) - it only needs to
+# tell "mains present" apart from "mains gone", not track normal
+# fluctuation.
+voltage_ob_threshold_default: 180
+
+# --------------------------------------------------------------------------
+# UPS units to monitor. "name" must match the section name in NUT's
+# ups.conf, "host" is normally "localhost" if upsd runs on this same
+# machine. Add/remove entries here freely - no code changes needed.
+#
+# voltage_fallback: true (optional, per-UPS) - some UPS/driver
+# combinations are known to misreport ups.status as OB even though mains
+# power is present and input.voltage reads normal (a HID-mapping quirk in
+# certain NUT subdrivers, not a real outage - seen e.g. on some
+# Phoenixtec/Liebert-HID-based units). With this set, the monitor reads
+# input.voltage directly and uses it as the authoritative signal whenever
+# it CAN be read, falling back to the driver's own ups.status only when
+# input.voltage can't be read at all (some of these same units also stop
+# reporting input.voltage while the battery is actively charging - that's
+# normal/expected, not an error). See get_effective_status() in
+# ups_monitor.py for the exact logic and rationale.
+# --------------------------------------------------------------------------
+upses:
+  - name: UPS1
+    host: localhost
+    description: "Rack UPS 1"
+  - name: UPS2
+    host: localhost
+    description: "Rack UPS 2"
+  - name: UPS3
+    host: localhost
+    description: "Rack UPS 3 (known ups.status quirk)"
+    voltage_fallback: true
+    # voltage_ob_threshold: 180   # optional override of voltage_ob_threshold_default
+
+# --------------------------------------------------------------------------
+# Email notifications (sent via SMTP)
+# --------------------------------------------------------------------------
+email:
+  enabled: true
+  smtp_host: smtp.example.com
+  smtp_port: 587
+  use_tls: true
+  username: "alerts@example.com"   # CHANGE ME
+  password: "CHANGE_ME"   # SMTP password - do not commit the real value
+  from_addr: "UPS Monitor <alerts@example.com>"
+  # Add/remove recipient addresses freely.
+  to_addrs:
+    - "you@example.com"
+
+# --------------------------------------------------------------------------
+# SMS notifications. Ships wired up for the Setera SMSGW
+# (https://sms-gw.setera.com:8040/sms, JSON body, "token" header for auth)
+# - see send_sms() in ups_monitor.py if you need to adapt it to a different
+# provider's API.
+# --------------------------------------------------------------------------
+sms:
+  enabled: true
+  gateway_url: "https://sms-gw.setera.com:8040/sms"
+  # API token your SMS gateway provider issues (via a secure channel).
+  api_token: "CHANGE_ME"   # do not commit the real value
+  # Sender ID shown to the recipient (your provider assigns/approves this).
+  sender_id: "CHANGE_ME"
+  # Your own ID for the message (optional - only used if your provider
+  # supports/requires an external_id). Leave blank ("") to omit it.
+  external_id_prefix: ""
+  # Add/remove destination numbers freely. Can be written with or without
+  # the leading "+" - the script strips it automatically since Setera
+  # wants E.164 without "+" (e.g. 15551234567).
+  to_numbers:
+    - "+15551234567"
+
+# --------------------------------------------------------------------------
+# Status code -> plain-language description, used as {status_description}
+# and {old_status_description} in the templates below. Every code the NUT
+# ups.status field can report is listed here - edit the TEXT freely to
+# whatever wording/language you want, the CODES on the left (OL, OB, LB,
+# ...) must stay as-is since they come directly from NUT/the UPS hardware.
+#
+# If a code the UPS reports isn't listed here at all, the raw code (e.g.
+# "TRIM") is shown instead of a description - so it's worth keeping this
+# list complete rather than deleting entries you think you'll never see.
+# --------------------------------------------------------------------------
+status_descriptions:
+  OL: "On line (mains power OK)"
+  OB: "On battery (mains power lost)"
+  LB: "Low battery"
+  HB: "High battery"
+  RB: "Battery needs replacing"
+  CHRG: "Battery charging"
+  DISCHRG: "Battery discharging"
+  BYPASS: "On bypass (load fed directly from mains)"
+  CAL: "Runtime calibration in progress"
+  OFF: "UPS is off"
+  OVER: "Overloaded"
+  TRIM: "Trimming high incoming voltage"
+  BOOST: "Boosting low incoming voltage"
+  FSD: "Forced shutdown in progress"
+  ALARM: "Alarm condition"
+  UNKNOWN: "Could not read status (driver/communication problem)"
+
+# --------------------------------------------------------------------------
+# Message content templates. Edit freely - no code changes needed.
+#
+# Placeholders available in every template below:
+#   {ups_name}               NUT UPS name, e.g. UPS1
+#   {description}            the "description" you set for it above
+#   {old_status}              previous ups.status CODE, e.g. "OB LB" (or
+#                             "UNKNOWN" the very first time a UPS is checked)
+#   {new_status}              current ups.status CODE, e.g. "OL"
+#   {status_description}      new_status translated via status_descriptions
+#                             above
+#   {old_status_description}  same, but for old_status
+#   {duration}                how long the UPS was in old_status before
+#                             changing to new_status, e.g. "5 min 32 s"
+#                             (says "unknown" on the very first check).
+#                             For the recovery_* templates specifically,
+#                             this is always the TRUE full outage duration
+#                             (from when OB first started), even if a
+#                             transient UNKNOWN blip happened in between
+#                             (e.g. upsd not ready yet right after a
+#                             reboot) - see outage_start in state.json.
+#   {timestamp}               always UTC, e.g. "11.09.2026 07:22:05 UTC"
+#                             (regardless of the server's local timezone)
+#
+# {old_status}/{new_status} are the raw technical NUT codes - avoid putting
+# those in message text meant to be non-technical; use {status_description}
+# / {old_status_description} instead, which read in plain language.
+#
+# Note: a status change that is ONLY the battery's CHRG/DISCHRG flag
+# toggling (e.g. "OL CHRG" -> "OL" once the battery finishes recharging
+# after an outage) does NOT trigger a message on its own - only a change in
+# the core status (OL/OB/LB/...) does. See IGNORED_STATUS_FLAGS in
+# ups_monitor.py.
+#
+# "recovery_*" templates are used ONLY for the specific transition where
+# power comes back (a tracked outage was active, and OL now appears) - so
+# you can call out {duration} as "time spent on battery" there. Any other
+# transition (power lost, low battery, driver problem, etc.) always uses
+# the plain templates above it. If you don't set a recovery_* template, the
+# plain one is used for that transition too.
+#
+# The full lifecycle of an outage is 4 steps, and only email/SMS is sent
+# for the ones noted:
+#   1) OL (mains fine)                                       - (no message)
+#   2) OB (mains lost)                            -> SMS + email (above)
+#   3) OB -> OL/OL CHRG (mains back, battery charging) -> SMS + email (recovery_*)
+#   4) OL CHRG -> OL (battery finished recharging) -> EMAIL ONLY (charge_complete_*
+#      below) - only sent if step 3 actually happened first (i.e. this
+#      won't fire for routine float-charge maintenance unrelated to a real
+#      outage). Extra placeholder available here: {outage_duration} - the
+#      duration of the outage that preceded this charge cycle.
+# --------------------------------------------------------------------------
+messages:
+  email:
+    subject: "[UPS ALERT] {ups_name}: {old_status} -> {new_status}"
+    body: |
+      UPS: {ups_name} ({description})
+      Previous status: {old_status} ({old_status_description})
+      New status: {new_status} ({status_description})
+      Time in previous status: {duration}
+      Time: {timestamp}
+
+    recovery_subject: "[UPS OK] {ups_name}: Power restored"
+    recovery_body: |
+      UPS: {ups_name} ({description})
+      Power restored - new status is ON LINE (OL).
+      Outage duration: {duration}
+      Time: {timestamp}
+
+    # Step 4 only - sent once the battery finishes recharging after a real
+    # outage (CHRG clears). Email only, no SMS - this is informational, not
+    # urgent, unlike steps 2 and 3 above.
+    charge_complete_subject: "[UPS OK] {ups_name}: Battery fully recharged"
+    charge_complete_body: |
+      UPS: {ups_name} ({description})
+      Battery is now fully recharged after the last outage.
+      Outage duration was: {outage_duration}
+      Time: {timestamp}
+
+  sms:
+    text: |-
+      {timestamp}
+      {ups_name}
+      {new_status} - {status_description}
+    recovery_text: |-
+      {timestamp}
+      {ups_name}
+      Power restored! Outage duration {duration}
